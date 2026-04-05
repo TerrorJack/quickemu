@@ -1000,16 +1000,18 @@ function configure_bios() {
                         );;
                 esac
             fi
-            # Attempt each EFI_CODE file one by one, selecting the corresponding code and vars
-            # when an existing file is found.
+            # Attempt each EFI_CODE file one by one, selecting the first complete code/vars
+            # pair that exists. This preserves the intended precedence order so package
+            # overrides prepended to the list are not replaced by later fallbacks.
             _IFS=$IFS
             IFS=","
             for f in "${ovmfs[@]}"; do
                 # shellcheck disable=SC2086
                 set -- ${f};
-                if [ -e "${1}" ]; then
+                if [ -e "${1}" ] && [ -e "${2}" ]; then
                     EFI_CODE="${1}"
                     EFI_EXTRA_VARS="${2}"
+                    break
                 fi
             done
             IFS=$_IFS
