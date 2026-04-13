@@ -1727,7 +1727,7 @@ function vm_boot() {
 
     if [ "${guest_os}" == "windows" ] || [ "${guest_os}" == "windows-server" ] || [ "${guest_os}" == "reactos" ] || [ "${guest_os}" == "freedos" ]; then
         # shellcheck disable=SC2054
-        args+=(-rtc base=localtime,clock=host,driftfix=slew)
+        args+=(-rtc base=utc,clock=host,driftfix=slew)
     else
         # shellcheck disable=SC2054
         args+=(-rtc base=utc,clock=host)
