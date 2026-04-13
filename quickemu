@@ -2035,11 +2035,6 @@ function vm_boot() {
         # shellcheck disable=SC2054,SC2206
         args+=(-drive if=ide,index=0,media=disk,file="${disk_img}")
 
-    elif [ "${guest_os}" == "windows-server" ]; then
-        # shellcheck disable=SC2054,SC2206
-        args+=(-device ide-hd,drive=SystemDisk
-            -drive id=SystemDisk,if=none,format=${disk_format},file="${disk_img}",${DRIVE_OPTIMISATIONS} ${STATUS_QUO})
-
     else
         if [ "${ARCH_VM}" == "aarch64" ]; then
             # ARM64: bootindex=2 ensures disk boots after CD-ROM (bootindex=1) during installation
