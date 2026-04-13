@@ -790,18 +790,9 @@ function configure_cpu() {
         HOST_CPU_SMT=$(cat /sys/devices/system/cpu/smt/control)
     fi
 
-    # Account for Hyperthreading/SMT.
-    if [ "${GUEST_CPU_CORES}" -ge 2 ]; then
-        case ${HOST_CPU_SMT} in
-            on) GUEST_CPU_THREADS=2
-                GUEST_CPU_LOGICAL_CORES=$(( GUEST_CPU_CORES / GUEST_CPU_THREADS ));;
-            *)  GUEST_CPU_THREADS=1
-                GUEST_CPU_LOGICAL_CORES=${GUEST_CPU_CORES};;
-        esac
-    else
-        GUEST_CPU_THREADS=1
-        GUEST_CPU_LOGICAL_CORES=${GUEST_CPU_CORES}
-    fi
+    HOST_CPU_SOCKETS=1
+    GUEST_CPU_THREADS=1
+    GUEST_CPU_LOGICAL_CORES=${GUEST_CPU_CORES}
 
     SMP="-smp cores=${GUEST_CPU_LOGICAL_CORES},threads=${GUEST_CPU_THREADS},sockets=${HOST_CPU_SOCKETS}"
     echo " - CPU:      ${HOST_CPU_MODEL}"
