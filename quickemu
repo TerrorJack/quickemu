@@ -2020,7 +2020,8 @@ function vm_boot() {
         fi
 
         # shellcheck disable=SC2054,SC2206
-        args+=(-device ${MAC_DISK_DEV},drive=SystemDisk
+        args+=(-object iothread,id=iothread0
+            -device ${MAC_DISK_DEV},drive=SystemDisk,iothread=iothread0
             -drive id=SystemDisk,if=none,format=${disk_format},file="${disk_img}",${DRIVE_OPTIMISATIONS} ${STATUS_QUO})
     elif [ "${guest_os}" == "kolibrios" ]; then
         # shellcheck disable=SC2054,SC2206
@@ -2044,11 +2045,13 @@ function vm_boot() {
         if [ "${ARCH_VM}" == "aarch64" ]; then
             # ARM64: bootindex=2 ensures disk boots after CD-ROM (bootindex=1) during installation
             # shellcheck disable=SC2054,SC2206
-            args+=(-device virtio-blk-pci,drive=SystemDisk,bootindex=2
+            args+=(-object iothread,id=iothread0
+                -device virtio-blk-pci,drive=SystemDisk,bootindex=2,iothread=iothread0
                 -drive id=SystemDisk,if=none,format=${disk_format},file="${disk_img}",${DRIVE_OPTIMISATIONS} ${STATUS_QUO})
         else
             # shellcheck disable=SC2054,SC2206
-            args+=(-device virtio-blk-pci,drive=SystemDisk
+            args+=(-object iothread,id=iothread0
+                -device virtio-blk-pci,drive=SystemDisk,iothread=iothread0
                 -drive id=SystemDisk,if=none,format=${disk_format},file="${disk_img}",${DRIVE_OPTIMISATIONS} ${STATUS_QUO})
         fi
     fi
