@@ -950,15 +950,24 @@ function configure_bios() {
         # Search for firmware if EFI_CODE is not set or the specified file doesn't exist
         if [ -z "${EFI_CODE}" ] || [ ! -e "${EFI_CODE}" ]; then
             if [ "${ARCH_VM}" == "aarch64" ]; then
-                # AAVMF firmware paths for ARM64 guests
-                # SecureBoot is not commonly supported on ARM64, use standard firmware
-                # shellcheck disable=SC2054,SC2140
-                ovmfs=("/usr/share/AAVMF/AAVMF_CODE.fd","/usr/share/AAVMF/AAVMF_VARS.fd" \
-                    "${SHARE_PATH}/edk2/aarch64/QEMU_CODE.fd","${SHARE_PATH}/edk2/aarch64/QEMU_VARS.fd" \
-                    "${SHARE_PATH}/edk2/aarch64/QEMU_EFI-pflash.raw","${SHARE_PATH}/edk2/aarch64/vars-template-pflash.raw" \
-                    "${SHARE_PATH}/qemu/edk2-aarch64-code.fd","${SHARE_PATH}/qemu/edk2-arm-vars.fd" \
-                    "${SHARE_PATH}/AAVMF/AAVMF_CODE.fd","${SHARE_PATH}/AAVMF/AAVMF_VARS.fd"
-                )
+                # AAVMF firmware paths for ARM64 guests. Secure Boot capable
+                # builds use Microsoft-enrolled vars.
+                if [[ "${secureboot}" == "on" ]]; then
+                    # shellcheck disable=SC2054,SC2140
+                    ovmfs=("/usr/share/AAVMF/AAVMF_CODE.ms.fd","/usr/share/AAVMF/AAVMF_VARS.ms.fd" \
+                        "${SHARE_PATH}/AAVMF/AAVMF_CODE.ms.fd","${SHARE_PATH}/AAVMF/AAVMF_VARS.ms.fd" \
+                        "/usr/share/AAVMF/AAVMF_CODE.fd","/usr/share/AAVMF/AAVMF_VARS.ms.fd" \
+                        "${SHARE_PATH}/AAVMF/AAVMF_CODE.fd","${SHARE_PATH}/AAVMF/AAVMF_VARS.ms.fd"
+                    )
+                else
+                    # shellcheck disable=SC2054,SC2140
+                    ovmfs=("/usr/share/AAVMF/AAVMF_CODE.fd","/usr/share/AAVMF/AAVMF_VARS.fd" \
+                        "${SHARE_PATH}/edk2/aarch64/QEMU_CODE.fd","${SHARE_PATH}/edk2/aarch64/QEMU_VARS.fd" \
+                        "${SHARE_PATH}/edk2/aarch64/QEMU_EFI-pflash.raw","${SHARE_PATH}/edk2/aarch64/vars-template-pflash.raw" \
+                        "${SHARE_PATH}/qemu/edk2-aarch64-code.fd","${SHARE_PATH}/qemu/edk2-arm-vars.fd" \
+                        "${SHARE_PATH}/AAVMF/AAVMF_CODE.fd","${SHARE_PATH}/AAVMF/AAVMF_VARS.fd"
+                    )
+                fi
             else
                 # x86_64 OVMF firmware paths
                 case ${secureboot} in
