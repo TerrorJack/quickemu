@@ -1291,10 +1291,14 @@ function configure_display() {
             # macOS has native VMware display driver support; aligns with OSX-KVM
             DISPLAY_DEVICE="vmware-svga";;
         windows|windows-server)
-            case ${display} in
-                none|spice) DISPLAY_DEVICE="qxl-vga";;
-                cocoa|gtk|sdl|spice-app) DISPLAY_DEVICE="virtio-vga";;
-            esac;;
+            if [[ "${ARCH_VM}" == "aarch64" ]]; then
+                DISPLAY_DEVICE="ramfb"
+            else
+                case ${display} in
+                    none|spice) DISPLAY_DEVICE="qxl-vga";;
+                    cocoa|gtk|sdl|spice-app) DISPLAY_DEVICE="virtio-vga";;
+                esac
+            fi;;
         *) DISPLAY_DEVICE="qxl-vga";;
     esac
 
@@ -1362,11 +1366,6 @@ function configure_display() {
 
     # Build the video configuration
     VIDEO="${VGA:+${VGA} }-device ${DISPLAY_DEVICE}"
-
-    # ARM64 needs ramfb for UEFI boot display before virtio-gpu driver loads
-    if [ "${ARCH_VM}" == "aarch64" ]; then
-        VIDEO="-device ramfb ${VIDEO}"
-    fi
 
     # Set display resolution for devices that support xres/yres parameters
     # Use (,|$) anchor to match device names with or without comma-separated parameters
