@@ -1972,10 +1972,23 @@ function vm_boot() {
 
     if [ -n "${iso}" ]; then
         if [ "${ARCH_VM}" == "aarch64" ]; then
-            # ARM64: bootindex=1 ensures UEFI boots from CD-ROM first during installation
-            # shellcheck disable=SC2054
-            args+=(-device scsi-cd,drive=cd0,bus=scsi0.0,bootindex=1
-                -drive id=cd0,if=none,format=raw,media=cdrom,readonly=on,file="${iso}")
+            if [[ "${guest_os}" == "windows"* ]]; then
+                # ARM64 Windows: WinPE lacks the virtio-scsi driver, so route the
+                # install ISO over USB storage which WinPE supports natively.
+                # bootindex=9 sits above the disk's bootindex=2, so UEFI tries the
+                # disk first and falls through to the CD only when the disk has
+                # nothing bootable. After Setup writes a Windows Boot Manager NVRAM
+                # entry, reboots go straight to disk and the install loop breaks.
+                # shellcheck disable=SC2054
+                args+=(-device qemu-xhci,id=installmedia
+                    -device usb-storage,drive=cd0,bus=installmedia.0,bootindex=9,removable=on
+                    -drive id=cd0,if=none,format=raw,media=cdrom,readonly=on,file="${iso}")
+            else
+                # ARM64: bootindex=1 ensures UEFI boots from CD-ROM first during installation
+                # shellcheck disable=SC2054
+                args+=(-device scsi-cd,drive=cd0,bus=scsi0.0,bootindex=1
+                    -drive id=cd0,if=none,format=raw,media=cdrom,readonly=on,file="${iso}")
+            fi
         else
             # shellcheck disable=SC2054
             args+=(-drive media=cdrom,index=0,file="${iso}")
