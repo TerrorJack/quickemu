@@ -319,7 +319,7 @@ function get_cpu_info() {
         elif [ "Socket" == "${INFO_NAME}" ]; then
             sysctl -n hw.packages
         elif [ "^Vendor ID" == "${INFO_NAME}" ]; then
-            if [ "${ARCH_HOST}" == "arm64" ]; then
+            if [[ "${ARCH_HOST}" == "aarch64" ]]; then
                 sysctl -n machdep.cpu.brand_string | cut -d' ' -f1
             else
                 sysctl -n machdep.cpu.vendor | sed 's/ //g'
@@ -2615,6 +2615,10 @@ readonly VERSION="4.9.9"
 arch="${arch:-x86_64}"
 ARCH_VM="${arch}"
 ARCH_HOST=$(uname -m)
+# Normalize arm64 (Darwin) to aarch64 so downstream checks only need one form
+if [[ "${ARCH_HOST}" == "arm64" ]]; then
+    ARCH_HOST="aarch64"
+fi
 QEMU=$(command -v "qemu-system-${ARCH_VM}")
 QEMU_IMG=$(command -v qemu-img)
 if [ ! -x "${QEMU}" ] || [ ! -x "${QEMU_IMG}" ]; then
