@@ -160,8 +160,43 @@ function delete_vm() {
     fi
 }
 
+function kill_sidecar() {
+    # Reap a sidecar process spawned alongside qemu (e.g. swtpm; later passt).
+    # Tries the recorded pid file first, then a process-pattern fallback for
+    # orphans whose pid file was wiped (e.g. by an external clean.sh) but whose
+    # process kept running. Finally clears the socket path so the next boot can
+    # bind to it.
+    #
+    # Usage: kill_sidecar <name> <pid_file> <pgrep_pattern> [socket_path]
+    local NAME="${1}"
+    local PID_FILE="${2}"
+    local PROC_PATTERN="${3}"
+    local SOCK_PATH="${4:-}"
+
+    if [[ -f "${PID_FILE}" ]]; then
+        local SIDECAR_PID
+        SIDECAR_PID=$(cat "${PID_FILE}" 2>/dev/null)
+        if [[ -n "${SIDECAR_PID}" ]] && kill -0 "${SIDECAR_PID}" 2>/dev/null; then
+            kill "${SIDECAR_PID}" 2>/dev/null || true
+            echo " - ${NAME} (${SIDECAR_PID}) killed."
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -f "${PROC_PATTERN}" 2>/dev/null || true
+    fi
+    if [[ -n "${SOCK_PATH}" ]]; then
+        rm -f "${SOCK_PATH}"
+    fi
+}
+
 function kill_vm() {
     echo "Killing ${VMNAME}"
+    # Sidecar processes (swtpm today; passt/etc. in future) can outlive qemu
+    # because their socket peer-disconnect handshake is not always delivered
+    # after kill -9. Reap them first; otherwise they keep their unix sockets
+    # bound and block the next boot.
+    kill_sidecar swtpm "${VMDIR}/${VMNAME}.swtpm.pid" "swtpm.*${VMNAME}\\.swtpm-sock" "${VMDIR}/${VMNAME}.swtpm-sock"
     if [ -z "${VM_PID}" ]; then
         echo " - ${VMNAME} is not running."
         rm -f "${VMDIR}/${VMNAME}.pid"
@@ -1562,6 +1597,11 @@ function configure_tpm() {
     # Start TPM
     if [ "${tpm}" == "on" ]; then
         local tpm_args=()
+        # A previous swtpm bound to this socket can outlive its qemu (the
+        # --terminate handshake is not always reliable, e.g. after kill -9).
+        # If left running it keeps the socket open with stale TPM state, which
+        # breaks the next boot. Clear it before starting.
+        kill_sidecar swtpm "${VMDIR}/${VMNAME}.swtpm.pid" "swtpm.*${VMNAME}\\.swtpm-sock" "${VMDIR}/${VMNAME}.swtpm-sock"
         # shellcheck disable=SC2054
         tpm_args+=(socket
             --ctrl type=unixio,path="${VMDIR}/${VMNAME}.swtpm-sock"
@@ -1570,8 +1610,16 @@ function configure_tpm() {
             --tpm2)
         echo "${SWTPM} ${tpm_args[*]} &" >> "${VMDIR}/${VMNAME}.sh"
         ${SWTPM} "${tpm_args[@]}" >> "${VMDIR}/${VMNAME}.log" &
-        echo " - TPM:      ${VMDIR}/${VMNAME}.swtpm-sock (${!})"
-        sleep 0.25
+        local SWTPM_PID="${!}"
+        echo "${SWTPM_PID}" > "${VMDIR}/${VMNAME}.swtpm.pid"
+        echo " - TPM:      ${VMDIR}/${VMNAME}.swtpm-sock (${SWTPM_PID})"
+        # Wait for the socket to actually appear so qemu does not race ahead
+        # and try to connect before swtpm is listening.
+        local i=0
+        while [[ ! -S "${VMDIR}/${VMNAME}.swtpm-sock" && ${i} -lt 50 ]]; do
+            sleep 0.1
+            i=$((i + 1))
+        done
     fi
 }
 
