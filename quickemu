@@ -813,6 +813,14 @@ function configure_cpu() {
                 else
                   GUEST_TWEAKS+=" -no-hpet"
                 fi
+                # Force fully in-kernel IRQ chip routing for Windows on KVM
+                # so Microsoft Hyper-V's nested partitions can deliver
+                # interrupts; the QEMU default 'split' mode leaves the
+                # IOAPIC in userspace and that combination has been
+                # observed to hang the L2 hypervisor on AMD hosts.
+                if [[ "${QEMU_ACCEL}" == "kvm" ]]; then
+                    MACHINE_TYPE+=",kernel-irqchip=on"
+                fi
             fi
             ;;
     esac
