@@ -41,7 +41,11 @@ function probe_io_uring() {
     local probe_file probe_out
     probe_file=$(mktemp --suffix=.qemu-probe)
     truncate -s 1M "${probe_file}"
-    probe_out=$("${QEMU}" -machine none -display none -nographic -nodefaults \
+    # `-machine none` keeps qemu in its main loop forever when the drive
+    # parses successfully, so wrap in `timeout` and bail out fast. We
+    # only care about catching the "aio=io_uring was specified, but is
+    # not available" diagnostic that qemu prints during cmdline parse.
+    probe_out=$(timeout 3 "${QEMU}" -machine none -display none -nographic -nodefaults \
         -no-reboot -m 64M \
         -drive id=p,if=none,format=raw,file="${probe_file}",cache=none,aio=io_uring \
         2>&1 | head -3 || true)
