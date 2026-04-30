@@ -761,6 +761,13 @@ function configure_cpu() {
                         add_cpu_flag "hv_vendor_id=1234567890ab"
                         add_cpu_flag "hv_vpindex"
                     fi
+                    # Expose nested virtualisation so Hyper-V/WSL2 work inside Windows.
+                    case ${HOST_CPU_VENDOR} in
+                        GenuineIntel)
+                            add_cpu_flag "+vmx";;
+                        AuthenticAMD|HygonGenuine)
+                            add_cpu_flag "+svm";;
+                    esac
                 fi
                 # Disable S3 support in the VM to ensure Windows can boot with SecureBoot enabled
                 #  - https://wiki.archlinux.org/title/QEMU/Troubleshooting#Virtual_machine_not_booting_when_using_a_Secure_Boot_enabled_OVMF
