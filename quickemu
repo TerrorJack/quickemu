@@ -20,6 +20,40 @@ function ignore_msrs_always() {
     fi
 }
 
+# Cache the io_uring availability decision: container runtimes (Podman,
+# Docker, Flatpak) often block the io_uring_* syscalls via seccomp even
+# when /proc/sys/kernel/io_uring_disabled is 0, so we have to actually
+# ask qemu rather than read the sysctl.
+IO_URING_OK=""
+function probe_io_uring() {
+    if [[ -n "${IO_URING_OK}" ]]; then
+        [[ "${IO_URING_OK}" == "yes" ]]
+        return
+    fi
+    if [[ -r /proc/sys/kernel/io_uring_disabled ]]; then
+        local d
+        d=$(cat /proc/sys/kernel/io_uring_disabled)
+        if [[ "${d}" != "0" ]]; then
+            IO_URING_OK="no"
+            return 1
+        fi
+    fi
+    local probe_file probe_out
+    probe_file=$(mktemp --suffix=.qemu-probe)
+    truncate -s 1M "${probe_file}"
+    probe_out=$("${QEMU}" -machine none -display none -nographic -nodefaults \
+        -no-reboot -m 64M \
+        -drive id=p,if=none,format=raw,file="${probe_file}",cache=none,aio=io_uring \
+        2>&1 | head -3 || true)
+    rm -f "${probe_file}"
+    if [[ "${probe_out}" == *"is not available"* ]]; then
+        IO_URING_OK="no"
+        return 1
+    fi
+    IO_URING_OK="yes"
+    return 0
+}
+
 function ignore_msrs_alert() {
     local ignore_msrs=""
     if [ "${OS_KERNEL}" == "Darwin" ]; then
@@ -1974,7 +2008,7 @@ function vm_boot() {
     # Optimise disk I/O: enable TRIM/discard, zero detection for thin provisioning,
     # writeback caching and threaded async I/O
     DRIVE_OPTIMISATIONS="discard=unmap,detect-zeroes=unmap"
-    if [[ $KERNEL_NAME == Linux ]]; then
+    if [[ $KERNEL_NAME == Linux ]] && probe_io_uring; then
         DRIVE_OPTIMISATIONS="$DRIVE_OPTIMISATIONS,cache=none,aio=io_uring"
     else
         DRIVE_OPTIMISATIONS="$DRIVE_OPTIMISATIONS,cache=writeback,aio=threads"
