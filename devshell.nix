@@ -3,8 +3,8 @@
   mkShell,
   pkgs,
   stdenv,
-  OVMF ? null,
-  OVMFFull ? null,
+  OVMF,
+  OVMFFull,
 }:
 mkShell {
   packages =
@@ -17,11 +17,12 @@ mkShell {
         gnugrep
         gnused
         jq
+        OVMF
+        OVMFFull
         pciutils
         procps
         python3
-        qemu_full
-        samba
+        qemu
         socat
         spice-gtk
         swtpm
@@ -30,14 +31,13 @@ mkShell {
         xorg.xrandr
         zsync
       ]
+      ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [
+        samba
+      ]
       ++ lib.optionals stdenv.hostPlatform.isLinux [
         mesa-demos
         usbutils
         xdg-user-dirs
-      ]
-      ++ lib.optionals (OVMF != null && OVMFFull != null) [
-        OVMF
-        OVMFFull
       ]
     );
 
@@ -50,19 +50,18 @@ mkShell {
     echo "* 'direnv reload' to update '.direnv/bin/quickemu' for testing  *"
     echo "**********************************************************************"
     sed \
-      ${
-        lib.optionalString (OVMF != null && OVMFFull != null) ''
-          -e '/OVMF_CODE_4M.secboot.fd/s|ovmfs=(|ovmfs=("${OVMFFull.firmware}","${OVMFFull.variablesMs}" |' \
-          -e '/OVMF_CODE_4M.fd/s|ovmfs=(|ovmfs=("${OVMF.firmware}","${OVMF.variables}" |' \
-        ''
-      }${lib.optionalString stdenv.hostPlatform.isDarwin ''
-        -e 's|ovmfs=("[$][{]SHARE_PATH}/OVMF/OVMF_CODE_4M.secboot.fd"|ovmfs=("${pkgs.qemu_full}/share/qemu/edk2-x86_64-secure-code.fd","${pkgs.qemu_full}/share/qemu/edk2-i386-vars.fd" "''${SHARE_PATH}/OVMF/OVMF_CODE_4M.secboot.fd"|' \
-        -e 's|ovmfs=("[$][{]SHARE_PATH}/OVMF/OVMF_CODE_4M.fd"|ovmfs=("${pkgs.qemu_full}/share/qemu/edk2-x86_64-code.fd","${pkgs.qemu_full}/share/qemu/edk2-i386-vars.fd" "''${SHARE_PATH}/OVMF/OVMF_CODE_4M.fd"|' \
-        -e 's|ovmfs=("/usr/share/AAVMF/AAVMF_CODE.fd"|ovmfs=("${pkgs.qemu_full}/share/qemu/edk2-aarch64-code.fd","${pkgs.qemu_full}/share/qemu/edk2-arm-vars.fd" "/usr/share/AAVMF/AAVMF_CODE.fd"|' \
+      -e '/OVMF_CODE_4M.secboot.fd/s|ovmfs=(|ovmfs=("${OVMFFull.firmware}","${OVMFFull.variablesMs}" |' \
+      -e '/OVMF_CODE_4M.fd/s|ovmfs=(|ovmfs=("${OVMF.firmware}","${OVMF.variables}" |' \
+      ${lib.optionalString stdenv.hostPlatform.isDarwin ''
+        -e 's|ovmfs=("[$][{]SHARE_PATH}/OVMF/OVMF_CODE_4M.secboot.fd"|ovmfs=("${pkgs.qemu}/share/qemu/edk2-x86_64-secure-code.fd","${pkgs.qemu}/share/qemu/edk2-i386-vars.fd" "''${SHARE_PATH}/OVMF/OVMF_CODE_4M.secboot.fd"|' \
+        -e 's|ovmfs=("[$][{]SHARE_PATH}/OVMF/OVMF_CODE_4M.fd"|ovmfs=("${pkgs.qemu}/share/qemu/edk2-x86_64-code.fd","${pkgs.qemu}/share/qemu/edk2-i386-vars.fd" "''${SHARE_PATH}/OVMF/OVMF_CODE_4M.fd"|' \
+        -e 's|ovmfs=("/usr/share/AAVMF/AAVMF_CODE.fd"|ovmfs=("${pkgs.qemu}/share/qemu/edk2-aarch64-code.fd","${pkgs.qemu}/share/qemu/edk2-arm-vars.fd" "/usr/share/AAVMF/AAVMF_CODE.fd"|' \
       ''} \
       -e '/cp "''${VARS_IN}" "''${VARS_OUT}"/a chmod +w "''${VARS_OUT}"' \
-      -e 's,\$(command -v smbd),${pkgs.samba}/bin/smbd,' \
       quickemu > $PWD/.direnv/bin/quickemu
+    ${lib.optionalString (!stdenv.hostPlatform.isDarwin) ''
+      sed -i -e 's,\$(command -v smbd),${pkgs.samba}/bin/smbd,' $PWD/.direnv/bin/quickemu
+    ''}
     chmod +x $PWD/.direnv/bin/quickemu
   '';
 }
