@@ -18,6 +18,7 @@ Depends:
  genisoimage,
  jq,
  mesa-utils,
+ passt,
  pciutils,
  procps,
  python3-minimal,

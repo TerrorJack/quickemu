@@ -1455,7 +1455,11 @@ function configure_ports() {
 
     if [ -n "${ssh_port}" ]; then
         echo "ssh,${ssh_port}" >> "${VMDIR}/${VMNAME}.ports"
-        NET="${NET},hostfwd=tcp::${ssh_port}-:22"
+        if [[ "${NET}" == passt* ]]; then
+            NET="${NET},tcp-ports=${ssh_port}:22"
+        else
+            NET="${NET},hostfwd=tcp::${ssh_port}-:22"
+        fi
         echo " - ssh:      On host:  ssh user@localhost -p ${ssh_port}"
     else
         echo " - ssh:      All ssh ports have been exhausted."
@@ -1468,8 +1472,13 @@ function configure_ports() {
             HOST_PORT=$(echo "${FORWARD}" | cut -d':' -f1)
             GUEST_PORT=$(echo "${FORWARD}" | cut -d':' -f2)
             echo "              - ${HOST_PORT} => ${GUEST_PORT}"
-            NET="${NET},hostfwd=tcp::${HOST_PORT}-:${GUEST_PORT}"
-            NET="${NET},hostfwd=udp::${HOST_PORT}-:${GUEST_PORT}"
+            if [[ "${NET}" == passt* ]]; then
+                NET="${NET},tcp-ports=${HOST_PORT}:${GUEST_PORT}"
+                NET="${NET},udp-ports=${HOST_PORT}:${GUEST_PORT}"
+            else
+                NET="${NET},hostfwd=tcp::${HOST_PORT}-:${GUEST_PORT}"
+                NET="${NET},hostfwd=udp::${HOST_PORT}-:${GUEST_PORT}"
+            fi
         done
     fi
 
@@ -1586,7 +1595,7 @@ function configure_file_sharing() {
         # SMB
         # We need to search in NixOS compatible paths as well as the standard location
         # since /usr/sbin/smbd may not be in the PATH.
-        if [ -x "$(command -v smbd)" ] || [ -x "/usr/sbin/smbd" ]; then
+        if [[ "${NET}" != passt* ]] && [[ -x "$(command -v smbd)" || -x "/usr/sbin/smbd" ]]; then
             NET+=",smb=${PUBLIC}"
             echo " - smbd:     On guest: smb://10.0.2.4/qemu"
         fi
@@ -1706,8 +1715,20 @@ function vm_boot() {
     boot=${boot,,}
     guest_os=${guest_os,,}
     args=()
-    # Set the hostname of the VM
-    NET="user,hostname=${VMNAME}"
+
+    # Use passt on Linux hosts, it's more performant and supports
+    # ipv6. Note that qemu has no passt equivalent for user
+    # networking's restrict=on. Also, explicitly specify DNS servers
+    # for passt, otherwise on hosts with systemd-resolved, passt only
+    # sees 127.0.0.53 in /etc/resolv.conf and DHCPv6 doesn't work.
+    if [[ "${KERNEL_NAME}" == "Linux" ]] &&
+       [[ "${network}" != "restrict" ]] &&
+       [[ "${bridge}" != "restrict" ]] &&
+       command -v passt >/dev/null 2>&1; then
+        NET="passt,param=--dns,param=2606:4700:4700::1111,param=--dns,param=1.1.1.1,param=--hostname,param=${VMNAME}"
+    else
+        NET="user,hostname=${VMNAME}"
+    fi
 
     echo "#!/usr/bin/env bash" > "${VMDIR}/${VMNAME}.sh"
 
@@ -1948,7 +1969,11 @@ function vm_boot() {
         # shellcheck disable=SC2054,SC2206
         args+=(-nic bridge,br=${network},model=${NET_DEVICE}${MAC})
     else
-        echo " - Network:  User (${NET_DEVICE})"
+        if [[ "${NET}" == passt* ]]; then
+            echo " - Network:  Passt (${NET_DEVICE})"
+        else
+            echo " - Network:  User (${NET_DEVICE})"
+        fi
         # shellcheck disable=SC2054,SC2206
         args+=(-device ${NET_DEVICE},netdev=nic -netdev ${NET},id=nic)
     fi
