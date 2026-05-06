@@ -26,8 +26,8 @@
   xdg-user-dirs,
   xrandr,
   zsync,
-  OVMF ? null,
-  OVMFFull ? null,
+  OVMF,
+  OVMFFull,
 }:
 let
   runtimePaths = [
@@ -37,11 +37,12 @@ let
     gnugrep
     gnused
     jq
+    OVMF
+    OVMFFull
     pciutils
     procps
     python3
     qemu_full
-    samba
     socat
     swtpm
     unzip
@@ -49,10 +50,11 @@ let
     xrandr
     zsync
   ]
+  ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [
+    samba
+  ]
   ++ lib.optionals stdenv.hostPlatform.isLinux [
     mesa-demos
-    OVMF
-    OVMFFull
     usbutils
     xdg-user-dirs
   ];
@@ -70,17 +72,15 @@ stdenv.mkDerivation (finalAttrs: {
 
   postPatch = ''
     sed -i \
-      ${
-        lib.optionalString (OVMF != null && OVMFFull != null) ''
-          -e '/AAVMF_CODE.ms.fd/s|ovmfs=(|ovmfs=("${OVMFFull.firmware}","${OVMFFull.variablesMs}" |' \
-          -e '/OVMF_CODE_4M.secboot.fd/s|ovmfs=(|ovmfs=("${OVMFFull.firmware}","${OVMFFull.variablesMs}" |' \
-          -e '/OVMF_CODE_4M.fd/s|ovmfs=(|ovmfs=("${OVMF.firmware}","${OVMF.variables}" |' \
-        ''
-      } \
+      -e '/AAVMF_CODE.ms.fd/s|ovmfs=(|ovmfs=("${OVMFFull.firmware}","${OVMFFull.variablesMs}" |' \
+      -e '/OVMF_CODE_4M.secboot.fd/s|ovmfs=(|ovmfs=("${OVMFFull.firmware}","${OVMFFull.variablesMs}" |' \
+      -e '/OVMF_CODE_4M.fd/s|ovmfs=(|ovmfs=("${OVMF.firmware}","${OVMF.variables}" |' \
       -e '/cp "''${VARS_IN}" "''${VARS_OUT}"/a chmod +w "''${VARS_OUT}"' \
       -e 's/Icon=.*qemu.svg/Icon=qemu/' \
-      -e 's,\$(command -v smbd),${samba}/bin/smbd,' \
       quickemu
+  ''
+  + lib.optionalString (!stdenv.hostPlatform.isDarwin) ''
+    sed -i -e 's,\$(command -v smbd),${samba}/bin/smbd,' quickemu
   '';
 
   nativeBuildInputs = [
