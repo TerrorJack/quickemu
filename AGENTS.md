@@ -108,4 +108,4 @@ fix(quickget): remove Athena OS (no longer getting updates)
 ## Key dependencies
 
 Runtime: qemu, cdrtools, curl, jq, spice-gtk, swtpm, samba, zsync
-Linux-specific: OVMF (x86_64 guests), AAVMF (aarch64 guests), usbutils, mesa-demos
+Linux-specific: OVMF (x86_64 guests), AAVMF (aarch64 guests), passt, usbutils, mesa-demos

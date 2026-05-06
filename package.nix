@@ -12,6 +12,7 @@
   gnused,
   jq,
   mesa-demos,
+  passt,
   pciutils,
   procps,
   python3,
@@ -57,6 +58,9 @@ let
     mesa-demos
     usbutils
     xdg-user-dirs
+  ]
+  ++ lib.optionals (lib.meta.availableOn stdenv.hostPlatform passt) [
+    passt
   ];
   # Extract version using builtins.split to avoid regex backtracking on large files.
   # builtins.match with .* patterns on multi-kilobyte files can cause stack overflow.
