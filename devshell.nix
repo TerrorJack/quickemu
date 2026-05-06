@@ -39,6 +39,9 @@ mkShell {
         usbutils
         xdg-user-dirs
       ]
+      ++ lib.optionals (lib.meta.availableOn stdenv.hostPlatform passt) [
+        passt
+      ]
     );
 
   inputsFrom = with pkgs; [
