@@ -1297,8 +1297,8 @@ function configure_display() {
     esac
 
     # Determine a sane resolution for Linux guests.
-    local X_RES="1280"
-    local Y_RES="800"
+    local X_RES="1920"
+    local Y_RES="1080"
     if [ -n "${width}" ] && [ -n "${height}" ]; then
         local X_RES="${width}"
         local Y_RES="${height}"
@@ -1414,7 +1414,6 @@ function configure_display() {
     # They use QEMU's default max_hostmem setting (256 MiB) which is sufficient for most use cases.
     case ${DISPLAY_DEVICE} in
         bochs-display) VIDEO="${VIDEO},vgamem=67108864";;
-        qxl|qxl-vga) VIDEO="${VIDEO},ram_size=65536,vram_size=65536,vgamem_mb=64";;
         ati-vga|cirrus-vga|VGA|vmware-svga) VIDEO="${VIDEO},vgamem_mb=256";;
     esac
 
