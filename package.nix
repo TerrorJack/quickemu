@@ -7,6 +7,7 @@
   testers,
   cdrtools,
   curl,
+  e2fsprogs,
   gawk,
   gnugrep,
   gnused,
@@ -34,6 +35,7 @@ let
   runtimePaths = [
     cdrtools
     curl
+    e2fsprogs
     gawk
     gnugrep
     gnused
