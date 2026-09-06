@@ -1167,6 +1167,10 @@ function configure_storage() {
             *) true;;
         esac
 
+        # Disable copy-on-write before the disk image is populated.
+        touch "${disk_img}"
+        chattr +C "${disk_img}" >/dev/null 2>&1 || true
+
         # https://blog.programster.org/qcow2-performance
         if ! ${QEMU_IMG} create -q -f "${disk_format}" -o "${create_options=}" "${disk_img}" "${disk_size}"; then
             echo "ERROR! Failed to create ${disk_img} using ${disk_format} format."
