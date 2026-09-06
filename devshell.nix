@@ -13,6 +13,7 @@ mkShell {
       [
         cdrtools
         curl
+        e2fsprogs
         gawk
         gnugrep
         gnused
