@@ -1,0 +1,478 @@
+#!/usr/bin/env python3
+"""Prepare and observe an unattended x86_64 macOS Tahoe installation."""
+import argparse
+import fcntl
+import hashlib
+import csv
+import io
+import json
+import os
+from pathlib import Path
+import plistlib
+import secrets
+import runpy
+import re
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import time
+import zlib
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def log(message):
+    print(f" - macOS:    {message}", flush=True)
+
+
+def resources():
+    script = Path(__file__).resolve().parent
+    for directory in (script / 'macos-unattended-guest', script.parent / 'share/quickemu/macos-unattended-guest'):
+        if directory.is_dir():
+            return directory
+    raise RuntimeError('macos-unattended-guest resources are missing')
+
+
+def seed_spec(state):
+    return f'{state / "seed.img"}@@1048576'
+
+
+def seed_read(state, name):
+    # macOS clears FAT's clean-shutdown bit while the volume is mounted.
+    # Read only; bypass mtools' clean-volume check without changing guest data.
+    result = subprocess.run(['mtype', '-i', seed_spec(state), f'::/state/{name}'],
+                            capture_output=True, env={**os.environ, 'MTOOLS_SKIP_CHECK': '1'})
+    return result.stdout.decode(errors='replace').strip() if result.returncode == 0 else ''
+
+
+def blank_disk(disk):
+    if not disk.exists():
+        return True
+    extents = json.loads(subprocess.check_output(['qemu-img', 'map', '--output=json', '-f', 'raw', str(disk)]))
+    with disk.open('rb') as stream:
+        for extent in extents:
+            if not extent['data'] or extent['zero']:
+                continue
+            stream.seek(extent['start'])
+            remaining = extent['length']
+            while remaining:
+                data = stream.read(min(remaining, 1024 * 1024))
+                if not data or any(data):
+                    return False
+                remaining -= len(data)
+    return True
+
+
+def disk_identity(disk):
+    path = Path(disk).resolve()
+    info = path.stat()
+    return {'path': str(path), 'device': info.st_dev, 'inode': info.st_ino}
+
+
+def verify_target(args, state):
+    saved = json.loads((state / 'target.json').read_text())
+    if disk_identity(args.disk or saved['path']) != saved:
+        raise RuntimeError('The system disk differs from the disk prepared for this installation; use a separate VM directory.')
+
+
+def configure_boot_routing(state):
+    boot = state.parent / 'OpenCore.img'
+    if not boot.exists():
+        return
+    spec = f'{boot}@@1048576'
+    config = plistlib.loads(subprocess.check_output(['mtype', '-i', spec, '::/EFI/OC/config.plist']))
+    pending = not (state / 'complete').exists()
+    wanted = {'ShowPicker': pending, 'Timeout': 60 if pending else 2, 'PickerMode': 'Builtin'}
+    if config['UEFI']['Quirks']['RequestBootVarRouting'] and all(config['Misc']['Boot'][key] == value for key, value in wanted.items()):
+        return
+    config['Misc']['Boot'].update(wanted)
+    # OVMF otherwise discards macOS BootNext entries during installer reboots.
+    # OpenRuntime routes them through OpenCore, as in LongQT's original config.
+    config['UEFI']['Quirks']['RequestBootVarRouting'] = True
+    temporary = state / 'boot-config.plist'
+    temporary.write_bytes(plistlib.dumps(config, sort_keys=False))
+    try:
+        run('mcopy', '-o', '-i', spec, str(temporary), '::/EFI/OC/config.plist')
+    finally:
+        temporary.unlink()
+
+
+def prepare(args, state):
+    for program in ('qemu-img', 'sfdisk', 'mformat', 'mcopy', 'mtype', 'ssh-keygen', 'ssh', 'tesseract'):
+        if not shutil.which(program):
+            raise RuntimeError(f'{program} is required for unattended macOS installation.')
+    if (state / 'seed.img').exists():
+        verify_target(args, state)
+        configure_boot_routing(state)
+        return
+    if not blank_disk(Path(args.disk)):
+        raise RuntimeError('Unattended installation requires a new, blank raw system disk.')
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state.chmod(0o700)
+    configure_boot_routing(state)
+    credentials = state / 'credentials.json'
+    if not credentials.exists():
+        credentials.write_text(json.dumps({'username': 'quickemu', 'password': secrets.token_urlsafe(18)}, indent=2) + '\n')
+        credentials.chmod(0o600)
+    settings = json.loads(credentials.read_text())
+    key = state / 'id_ed25519'
+    if not key.exists():
+        run('ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'quickemu-unattended', '-f', str(key))
+    tree = state / 'seed'
+    runpy.run_path(str(resources() / 'build.py'))['build'](
+        tree, settings['username'], settings['password'], key.with_suffix('.pub').read_text())
+    temporary = state / 'seed.tmp.img'
+    with temporary.open('wb') as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.truncate(128 * 1024 * 1024)
+    run('sfdisk', '--quiet', str(temporary), input=b'label: gpt\nstart=2048, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7\n', stdout=subprocess.DEVNULL)
+    spec = f'{temporary}@@1048576'
+    layout = json.loads(subprocess.check_output(['sfdisk', '--json', str(temporary)]))
+    sectors = layout['partitiontable']['partitions'][0]['size']
+    run('mformat', '-i', spec, '-T', str(sectors), '-v', 'QUICKEMU', '::')
+    for child in tree.iterdir():
+        run('mcopy', '-i', spec, '-sp', str(child), '::/')
+    (state / 'target.json').write_text(json.dumps(disk_identity(args.disk), indent=2) + '\n')
+    temporary.replace(state / 'seed.img')
+    log(f'Installation credentials: {credentials}')
+
+
+class QMP:
+    def __init__(self, path):
+        self.reset_count = 0
+        self.socket = socket.socket(socket.AF_UNIX)
+        self.socket.settimeout(15)
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                self.socket.connect(str(path))
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(.25)
+        self.stream = self.socket.makefile('rwb', buffering=0)
+        self.stream.readline()
+        self.command('qmp_capabilities')
+
+    def command(self, execute, arguments=None):
+        self.stream.write((json.dumps({'execute': execute, 'arguments': arguments or {}}) + '\n').encode())
+        while True:
+            line = self.stream.readline()
+            if not line:
+                raise RuntimeError('QEMU monitor disconnected')
+            reply = json.loads(line)
+            if reply.get('event') in ('RESET', 'SHUTDOWN'):
+                self.reset_count += 1
+            if 'error' in reply:
+                raise RuntimeError(str(reply['error']))
+            if 'return' in reply:
+                return reply['return']
+
+    def key(self, key):
+        self.command('human-monitor-command', {'command-line': f'sendkey {key} 60'})
+        time.sleep(.15)
+
+    def type(self, text):
+        mapping = {' ': 'spc', '/': 'slash', '.': 'dot', '-': 'minus', '_': 'shift-minus', '\n': 'ret'}
+        for char in text:
+            self.key(mapping.get(char, 'shift-' + char.lower() if char.isupper() else char))
+
+    def move(self, x, y, width, height):
+        self.command('input-send-event', {'events': [
+            {'type': 'abs', 'data': {'axis': 'x', 'value': round(x * 32767 / (width - 1))}},
+            {'type': 'abs', 'data': {'axis': 'y', 'value': round(y * 32767 / (height - 1))}},
+        ]})
+
+    def click(self, x, y, width, height):
+        self.move(x, y, width, height)
+        time.sleep(.2)
+        for down in (True, False):
+            self.command('input-send-event', {'events': [{'type': 'btn', 'data': {'button': 'left', 'down': down}}]})
+            time.sleep(.2)
+
+    def screenshot(self, state):
+        path = state / 'screen.ppm'
+        self.command('screendump', {'filename': str(path)})
+        with path.open('rb') as stream:
+            if stream.readline().strip() != b'P6':
+                raise RuntimeError('Unexpected QEMU screenshot format')
+            line = stream.readline()
+            while line.startswith(b'#'):
+                line = stream.readline()
+            width, height = map(int, line.split())
+            if stream.readline().strip() != b'255':
+                raise RuntimeError('Unexpected QEMU screenshot depth')
+            data = stream.read()
+        def chunk(kind, body):
+            return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body))
+        png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+        png += chunk(b'IDAT', zlib.compress(b''.join(b'\0' + data[y * width * 3:(y + 1) * width * 3] for y in range(height))))
+        (state / 'screen.png').write_bytes(png + chunk(b'IEND', b''))
+        # Recovery uses tiny white text on dark backgrounds. Thresholding and
+        # doubling the image avoids Tesseract losing the menu and terminal text.
+        pixels = bytearray()
+        for y in range(height):
+            row = bytearray()
+            for x in range(width):
+                offset = (y * width + x) * 3
+                value = 0 if min(data[offset:offset + 3]) > 145 else 255
+                row.extend((value, value))
+            pixels.extend(row * 2)
+        ocr = state / 'ocr.pgm'
+        ocr.write_bytes(f'P5\n{width * 2} {height * 2}\n255\n'.encode() + pixels)
+        result = run('tesseract', str(ocr), 'stdout', '-l', 'eng', '--psm', '11', 'tsv', capture_output=True, text=True)
+        words = [row for row in csv.DictReader(io.StringIO(result.stdout), delimiter='\t') if row.get('text', '').strip()]
+        text = ' '.join(row['text'] for row in words)
+        (state / 'screen.txt').write_text(text + '\n')
+        return width, height, words, text
+
+
+def ssh_verify(args, state):
+    settings = json.loads((state / 'credentials.json').read_text())
+    command = ['ssh', '-i', str(state / 'id_ed25519'), '-p', str(args.ssh_port),
+               '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new',
+               '-o', f'UserKnownHostsFile={state / "known_hosts"}', f'{settings["username"]}@127.0.0.1',
+               'sw_vers; uname -m; '
+               'printf "QUICKEMU_CONSOLE=%s\\n" "$(stat -f %Su /dev/console)"; '
+               'printf "QUICKEMU_BOOT=%s\\n" "$(sysctl -n kern.boottime)"; '
+               'test -f /var/db/quickemu-unattended-complete']
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        (state / 'ssh-error.txt').write_text('SSH verification timed out.\n')
+        return False
+    (state / 'ssh-error.txt').write_text(result.stderr)
+    if result.returncode == 0 and '26.' in result.stdout and 'x86_64' in result.stdout:
+        console = re.search(r'^QUICKEMU_CONSOLE=(.+)$', result.stdout, re.MULTILINE)
+        boot = re.search(r'^QUICKEMU_BOOT=(.+)$', result.stdout, re.MULTILINE)
+        if not console or not boot:
+            (state / 'ssh-error.txt').write_text('Guest login status is missing.\n')
+            return False
+        requested = state / 'login-reboot.json'
+        if requested.exists():
+            previous = json.loads(requested.read_text())
+            if previous['boot'] == boot.group(1):
+                return False
+        elif console.group(1) != settings['username']:
+            # loginwindow reads automatic-login settings during system startup.
+            # Persist the request first so reattaching never repeats this reboot.
+            configure_boot_routing(state)
+            requested.write_text(json.dumps({'boot': boot.group(1)}) + '\n')
+            log('Restarting once to activate automatic login.')
+            try:
+                restart = subprocess.run(command[:-1] + ['sudo -n /sbin/shutdown -r now'],
+                                         capture_output=True, text=True, timeout=20)
+            except subprocess.TimeoutExpired:
+                return False
+            if restart.returncode not in (0, 255):
+                raise RuntimeError(f'Guest restart failed: {restart.stderr.strip()}')
+            return False
+        if console.group(1) != settings['username']:
+            return False
+        (state / 'verification.txt').write_text(result.stdout)
+        (state / 'complete').write_text(time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()) + '\n')
+        configure_boot_routing(state)
+        log(f'Tahoe installation verified over SSH (port {args.ssh_port}).')
+        log(f'Credentials: {state / "credentials.json"}')
+        return True
+    return False
+
+
+def boot_entries(text):
+    if 'OpenCore Boot Menu' not in text:
+        return []
+    return re.findall(r'(?:^|\s)([1-9])\.\s+(.*?)(?=\s+[1-9]\.\s|$)', text)
+
+
+def boot_entry(text, status):
+    entries = boot_entries(text)
+    if status in ('', 'recovery-ready', 'installing'):
+        preferred = ('base syst',)
+    elif status in ('provisioned', 'configuring', 'complete'):
+        preferred = ('macintosh',)
+    elif status == 'prepared':
+        preferred = ('installer', 'macintosh')
+    else:
+        return None
+    for label in preferred:
+        for number, name in entries:
+            if label in name.lower():
+                return number
+    return None
+
+
+class RecoveryReboot:
+    """Recover a stalled, explicitly requested Recovery reboot, once per stage."""
+    def __init__(self, state):
+        self.path = state / 'reboot-resets.json'
+        self.completed = json.loads(self.path.read_text()) if self.path.exists() else []
+        self.marker = None
+        self.signature = None
+        self.since = 0
+        self.generation = 0
+
+    def ready(self, marker, signature, generation, now):
+        if self.marker and generation != self.generation and self.marker not in self.completed:
+            self.record()
+        if not marker:
+            self.signature, self.since = None, now
+            return False
+        if marker in self.completed:
+            return False
+        if marker != self.marker:
+            self.marker, self.signature = marker, signature
+            self.since, self.generation = now, generation
+            return False
+        if generation != self.generation:
+            # A native reboot already happened; never reset the new boot for an
+            # old Recovery marker, even if its framebuffer has not refreshed.
+            self.since = float('inf')
+            return False
+        if signature != self.signature:
+            self.signature, self.since = signature, now
+            return False
+        return now - self.since >= 180
+
+    def record(self):
+        self.completed.append(self.marker)
+        temporary = self.path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(self.completed) + '\n')
+        temporary.replace(self.path)
+
+
+def observe(args, state):
+    verify_target(args, state)
+    if (state / 'complete').exists():
+        return
+    lock = (state / 'controller.lock').open('w')
+    lock_deadline = time.monotonic() + 30
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError as error:
+            if time.monotonic() >= lock_deadline:
+                raise RuntimeError('An installation controller is already running for this VM.') from error
+            time.sleep(1)
+    qmp = QMP(args.qmp)
+    deadline = time.monotonic() + args.timeout
+    previous = None
+    last_report = 0
+    command_sent = False
+    last_ssh_check = 0
+    command_time = 0
+    terminal_requested = False
+    last_boot_choice = 0
+    last_wake = 0
+    wake_count = 0
+    reboot = RecoveryReboot(state)
+    while time.monotonic() < deadline:
+        status = seed_read(state, 'status')
+        error = seed_read(state, 'error')
+        if status != previous or time.monotonic() - last_report > 60:
+            log('Verifying SSH and automatic login...' if status == 'complete' else status or 'Waiting for macOS Recovery...')
+            previous, last_report = status, time.monotonic()
+        if error or status.endswith('-failed'):
+            (state / 'recovery.log').write_text(seed_read(state, 'recovery.log'))
+            raise RuntimeError(f'{error or status}; see {state / "recovery.log"}')
+        width, height, words, text = qmp.screenshot(state)
+        if time.monotonic() - last_wake > 60:
+            # Recovery allows display sleep during long preparation. Pointer
+            # motion wakes it without sending keys to the installer or firmware.
+            qmp.move(5 + wake_count % 2, 5, width, height)
+            wake_count += 1
+            last_wake = time.monotonic()
+        if status and time.monotonic() - last_ssh_check > 30:
+            last_ssh_check = time.monotonic()
+            if ssh_verify(args, state):
+                return
+        if command_sent and not status and time.monotonic() - command_time > 90:
+            raise RuntimeError(f'Recovery script did not start; see {state / "screen.png"}.')
+        recovery_log = seed_read(state, 'recovery.log')
+        attempt = recovery_log.rsplit('Preparing to run macOS Installer...', 1)[-1]
+        prepared = 'System going down for install...' in attempt
+        marker = None
+        signature = None
+        if prepared and status == 'installing' and 'Terminal' in text and ('Preparing' in text or 'startosinstall' in text):
+            marker = hashlib.sha256(recovery_log.encode()).hexdigest()
+            stats = qmp.command('query-blockstats')
+            activity = tuple((item.get('device'), tuple(item['stats'].get(key, 0) for key in
+                             ('rd_operations', 'wr_operations', 'flush_operations', 'unmap_operations')))
+                             for item in stats)
+            signature = (hashlib.sha256((state / 'screen.ppm').read_bytes()).hexdigest(), activity)
+        if reboot.ready(marker, signature, qmp.reset_count, time.monotonic()):
+            # The installer requested restart and both display and all disk I/O
+            # have been unchanged for three minutes. Some x86 Recovery kernels
+            # spin during shutdown; honor that request without resetting a slow
+            # but active installer, or a later boot that already emitted RESET.
+            log('Recovery stalled after requesting restart; completing that restart.')
+            configure_boot_routing(state)
+            qmp.command('system_reset')
+            reboot.record()
+            time.sleep(5)
+            continue
+        selection_status = 'prepared' if prepared and status in ('installing', 'recovery-ready') else status
+        choice = boot_entry(text, selection_status)
+        if choice and time.monotonic() - last_boot_choice > 20:
+            log(f'Selecting OpenCore boot entry {choice}.')
+            # Ctrl+index saves the installed system as the default before we
+            # hide the picker; Recovery can still be attached on native reboot.
+            name = dict(boot_entries(text))[choice]
+            qmp.key('ctrl-' + choice if 'macintosh' in name.lower() else choice)
+            last_boot_choice = time.monotonic()
+            time.sleep(5)
+            continue
+        utilities = next((word for word in words if word['text'].endswith('Utilities') and int(word['top']) < 100), None)
+        if status in ('', 'recovery-ready', 'installing'):
+            if utilities and ('Reinstall' in text or 'Recovery' in text):
+                if prepared:
+                    raise RuntimeError(f'The prepared installer booted back into Recovery; see {state / "screen.png"}. Restart Quickemu to retry its installer boot entry.')
+                # Returning to Recovery after an interrupted install is resumable;
+                # the guest script verifies its checkpoint and never re-erases it.
+                command_sent = False
+                terminal_requested = True
+                qmp.click((int(utilities['left']) + int(utilities['width']) / 2) / 2,
+                          (int(utilities['top']) + int(utilities['height']) / 2) / 2, width, height)
+                qmp.key('t')
+                qmp.key('ret')
+            elif not command_sent and (terminal_requested or not status) and 'Terminal' in text and ('bash' in text or 'Shell' in text):
+                log('Starting the recovery installation script.')
+                qmp.type('/bin/bash /Volumes/QUICKEMU/recovery.sh\n')
+                command_sent = True
+                terminal_requested = False
+                command_time = time.monotonic()
+            elif not status and 'English' in text and 'Language' in text:
+                qmp.key('ret')
+        time.sleep(10)
+    raise RuntimeError(f'Installation timed out; QEMU remains running. See {state / "screen.png"} and seed state logs.')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['prepare', 'run', 'screenshot'])
+    parser.add_argument('--dir', required=True)
+    parser.add_argument('--disk')
+    parser.add_argument('--qmp')
+    parser.add_argument('--ssh-port', type=int, default=22220)
+    parser.add_argument('--timeout', type=int, default=14400)
+    args = parser.parse_args()
+    state = Path(args.dir).resolve() / 'unattended'
+    if args.action == 'prepare':
+        prepare(args, state)
+    elif args.action == 'screenshot':
+        QMP(args.qmp).screenshot(state)
+    else:
+        observe(args, state)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        print(f'ERROR! {error}', file=sys.stderr)
+        sys.exit(1)

@@ -28,6 +28,7 @@ These are the options and defaults for the \<vm\>.conf file
 boot="efi"
 cpu_cores=""
 disk_img=""
+disk_format="qcow2"
 disk_size=""
 display=""
 extra_args=""
@@ -38,6 +39,8 @@ img=""
 iso=""
 macaddr=""
 macos_release=""
+macos_unattended="off"
+macos_install_timeout=14400
 network=""
 port_forwards=()
 preallocation="off"
@@ -89,6 +92,34 @@ macos_release="catalina"
     Big Sur and newer, but not previous releases.
   - And VirtIO Block Media (disks) are supported/stable in Catalina and
     newer.
+
+For unattended macOS Tahoe installation, `quickget --unattended macos tahoe`
+generates these settings along with the VM's persistent network identity:
+
+```shell
+guest_os="macos"
+macos_release="tahoe"
+macos_unattended="on"
+img="macos-tahoe/RecoveryImage.img"
+disk_img="macos-tahoe/disk.img"
+disk_format="raw"
+disk_size="128G"
+cpu_cores=4
+ram="8G"
+```
+
+On AMD hosts, the generated unattended configuration uses `cpu_cores=1` to
+avoid macOS shutdown hangs observed with multiple vCPUs. Other hosts and
+manual Tahoe configurations use 4 cores. You can change `cpu_cores`, but
+verify native guest reboot and shutdown after increasing it on AMD.
+
+`macos_unattended="on"` enables automatic installation on an x86_64 host and
+guest. It requires a raw disk. Quickemu sets NOCOW when creating the disk on
+Btrfs and rejects an existing Btrfs disk without this attribute. Installer
+state and generated account credentials are kept in the VM's `unattended`
+directory. Preserve that directory when restarting an installation.
+`macos_install_timeout` sets the observation timeout in seconds (default 14400,
+four hours). Reaching the timeout leaves the VM running.
 
 The default Windows 11 configuration looks like this:
 

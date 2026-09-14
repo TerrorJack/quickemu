@@ -22,6 +22,13 @@ function arch_suffix() {
     fi
 }
 
+function host_cpu_vendor() {
+    case "${HOST_OS}" in
+        Linux) awk -F ': *' '/^vendor_id[[:space:]]*:/ { print $2; exit }' /proc/cpuinfo 2>/dev/null;;
+        Darwin) sysctl -n machdep.cpu.vendor 2>/dev/null;;
+    esac
+}
+
 function cleanup() {
     if [ -n "$(jobs -p)" ]; then
         kill "$(jobs -p)" 2>/dev/null
@@ -1557,6 +1564,7 @@ function make_vm_config() {
     local ISO_FILE=""
     local IMAGE_TYPE=""
     local GUEST=""
+    local DISK_FILE="disk.qcow2"
     if [ "${OPERATION}" == "download" ]; then
         exit 0
     fi
@@ -1624,6 +1632,9 @@ function make_vm_config() {
     esac
 
     CONF_FILE="${VM_PATH}.conf"
+    if [ "${OS}" == "macos" ] && [ "${RELEASE}" == "tahoe" ]; then
+        DISK_FILE="disk.img"
+    fi
 
     if [ ! -e "${CONF_FILE}" ]; then
         echo "Making ${CONF_FILE}"
@@ -1639,7 +1650,7 @@ function make_vm_config() {
 #!${QUICKEMU} --vm
 guest_os="${GUEST}"
 ${ARCH_LINE:+${ARCH_LINE}
-}disk_img="${VM_PATH}/disk.qcow2"
+}disk_img="${VM_PATH}/${DISK_FILE}"
 ${IMAGE_TYPE}="${VM_PATH}/${IMAGE_FILE}"
 EOF
         echo " - Setting ${CONF_FILE} executable"
@@ -1708,6 +1719,26 @@ EOF
             macos)
                 echo "disk_size=\"128G\"" >> "${CONF_FILE}"
                 echo "macos_release=\"${RELEASE}\"" >> "${CONF_FILE}"
+                if [ "${RELEASE}" == "tahoe" ]; then
+                    {
+                        echo 'disk_format="raw"'
+                        # Multiple vCPUs can hang Tahoe shutdown on AMD hosts.
+                        if [ "${UNATTENDED}" == "on" ] && [ "$(host_cpu_vendor)" == "AuthenticAMD" ]; then
+                            echo 'cpu_cores=1'
+                        else
+                            echo 'cpu_cores=4'
+                        fi
+                        echo 'ram="8G"'
+                        if [ "${UNATTENDED}" == "on" ]; then
+                            echo 'macos_unattended="on"'
+                        fi
+                        python3 - "${VM_PATH}/macos-identity.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream:
+    print('macaddr="' + json.load(stream)['MAC'] + '"')
+PY
+                    } >> "${CONF_FILE}"
+                fi
                 # https://github.com/quickemu-project/quickemu/issues/438
                 if [ "${RELEASE}" == "monterey" ]; then
                     echo "cpu_cores=2" >> "${CONF_FILE}"
@@ -2282,6 +2313,122 @@ function generate_id() {
     echo "${macRecoveryID}"
 }
 
+function macos_download_asset() {
+    local URL="${1}" FILE="${2}" HASH="${3}"
+    if [ -f "${FILE}" ] && python3 - "${FILE}" "${HASH}" <<'PY'
+import hashlib, pathlib, sys
+sys.exit(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() != sys.argv[2])
+PY
+    then
+        return 0
+    fi
+    if ! curl --disable --fail --location --retry 3 --connect-timeout 30 \
+        --output "${FILE}.download" "${URL}"; then
+        rm -f "${FILE}.download"
+        return 1
+    fi
+    if ! python3 - "${FILE}.download" "${HASH}" <<'PY'
+import hashlib, pathlib, sys
+sys.exit(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() != sys.argv[2])
+PY
+    then
+        echo "ERROR! Downloaded macOS boot asset failed SHA256 verification: ${FILE}"
+        rm -f "${FILE}.download"
+        return 1
+    fi
+    mv "${FILE}.download" "${FILE}"
+}
+
+function provision_macos_tahoe() {
+    # Sources and settings follow dockur/macos, pinned for reproducible boot media.
+    # Keep generated identity, OpenCore, and writable NVRAM across subsequent runs.
+    local TOOL SEVENZIP=""
+    for TOOL in python3 sfdisk mformat mcopy; do
+        if ! command -v "${TOOL}" >/dev/null; then
+            echo "ERROR! ${TOOL} is required to prepare macOS Tahoe (install Python 3, util-linux and mtools)."
+            return 1
+        fi
+    done
+    for TOOL in 7zz 7z; do
+        if command -v "${TOOL}" >/dev/null; then
+            SEVENZIP="${TOOL}"
+            break
+        fi
+    done
+    if [ -z "${SEVENZIP}" ]; then
+        echo "ERROR! 7zz or 7z is required to extract the macOS Tahoe bootloader."
+        return 1
+    fi
+    require_qemu_img
+    (
+        set -e
+        local CACHE="${VM_PATH}/.boot-assets"
+        local WORK=""
+        local PARTITION_SECTORS=""
+        local OSX_KVM_COMMIT="326053dd61f49375d5dfb28ee715d38b04b5cd8e"
+        local DOCKUR_COMMIT="7cf19d116165d0108f8cc08473ec533a1f08f1b6"
+        mkdir -p "${CACHE}"
+        if [ ! -s "${VM_PATH}/OVMF_CODE.fd" ]; then
+            macos_download_asset "https://raw.githubusercontent.com/kholia/OSX-KVM/${OSX_KVM_COMMIT}/OVMF_CODE.fd" \
+                "${VM_PATH}/OVMF_CODE.fd" 52a625db5a45329bf8005232db33e94781787d92ae8d088f2f73332dd4ded3a9
+        fi
+        if [ ! -s "${VM_PATH}/OVMF_VARS-1920x1080.fd" ]; then
+            macos_download_asset "https://raw.githubusercontent.com/kholia/OSX-KVM/${OSX_KVM_COMMIT}/OVMF_VARS-1920x1080.fd" \
+                "${VM_PATH}/OVMF_VARS-1920x1080.fd" 6ed987af3a3c155be71665f510eae3e007eda9b8b94afd59d45e91c4a11565cc
+        fi
+        [ ! -s "${VM_PATH}/OpenCore.img" ] || exit 0
+        echo "Preparing OpenCore for macOS Tahoe"
+        macos_download_asset "https://github.com/LongQT-sea/OpenCore-ISO/releases/download/v0.7/LongQT-OpenCore-v0.7.iso" \
+            "${CACHE}/LongQT-OpenCore-v0.7.iso" 287328995d4198f1b05166f087d85bf7ef66bedafe150d17ad112ac8de60051d
+        macos_download_asset "https://github.com/Carnations-Botanica/VMHide/releases/download/2.0.0/VMHide-2.0.0-RELEASE.zip" \
+            "${CACHE}/VMHide-2.0.0-RELEASE.zip" 31ffb861192eea52ad166fc0629b411ae48d8507c75935ab875bc61aebaa8dbb
+        macos_download_asset "https://raw.githubusercontent.com/dockur/macos/${DOCKUR_COMMIT}/assets/config.plist" \
+            "${CACHE}/config.plist" 616f9e415c1c639edc1b23940588277a540ec93098b032cb81a3bc1212fb7fd7
+        WORK=$(mktemp -d "${CACHE}/build.XXXXXXXX")
+        trap 'rm -rf "${WORK}"' EXIT
+        "${SEVENZIP}" x -y "${CACHE}/LongQT-OpenCore-v0.7.iso" "-o${WORK}" 'EFI_RELEASE/*' >/dev/null
+        "${SEVENZIP}" x -y "${CACHE}/VMHide-2.0.0-RELEASE.zip" "-o${WORK}/EFI_RELEASE/EFI/OC/Kexts" >/dev/null
+        python3 - "${VM_PATH}" "${CACHE}/config.plist" "${WORK}/EFI_RELEASE/EFI/OC/config.plist" <<'PY'
+import json, pathlib, plistlib, secrets, sys, uuid
+
+vm, source, destination = map(pathlib.Path, sys.argv[1:])
+identity_path = vm / 'macos-identity.json'
+if identity_path.exists():
+    identity = json.loads(identity_path.read_text())
+else:
+    identity = {
+        'SystemProductName': 'MacPro7,1',
+        'SystemSerialNumber': 'C02' + secrets.token_hex(5).upper()[:9],
+        'MLB': secrets.token_hex(9).upper()[:17],
+        'SystemUUID': str(uuid.uuid4()).upper(),
+        'MAC': '52:54:00:' + ':'.join(f'{byte:02x}' for byte in secrets.token_bytes(3)),
+    }
+    temporary = identity_path.with_suffix('.json.tmp')
+    temporary.write_text(json.dumps(identity, indent=2) + '\n')
+    temporary.replace(identity_path)
+with source.open('rb') as stream:
+    config = plistlib.load(stream)
+generic = config['PlatformInfo']['Generic']
+generic.update({key: value for key, value in identity.items() if key != 'MAC'})
+generic['ROM'] = bytes.fromhex(identity['MAC'].replace(':', ''))
+config['UEFI']['Output']['Resolution'] = '1920x1080@32'
+# Preserve the installer's BootNext across OVMF reboots instead of letting
+# firmware consume or discard the macOS-specific boot entry before OpenCore.
+config['UEFI']['Quirks']['RequestBootVarRouting'] = True
+config['Misc']['Boot'].update(ShowPicker=False, Timeout=2, LauncherOption='Disabled')
+with destination.open('wb') as stream:
+    plistlib.dump(config, stream, sort_keys=False)
+PY
+        # A separate GPT/FAT32 boot disk works without privileged loop mounts.
+        "${QEMU_IMG}" create -q -f raw -o nocow=on "${WORK}/OpenCore.img" 256M
+        printf 'label: gpt\nstart=2048, type=U\n' | sfdisk --quiet "${WORK}/OpenCore.img"
+        PARTITION_SECTORS=$(sfdisk --json "${WORK}/OpenCore.img" | python3 -c 'import json, sys; print(json.load(sys.stdin)["partitiontable"]["partitions"][0]["size"])')
+        mformat -i "${WORK}/OpenCore.img@@1048576" -T "${PARTITION_SECTORS}" -F -v EFI ::
+        mcopy -i "${WORK}/OpenCore.img@@1048576" -spm "${WORK}/EFI_RELEASE/EFI" ::/
+        mv "${WORK}/OpenCore.img" "${VM_PATH}/OpenCore.img"
+    )
+}
+
 function get_macos() {
     local appleSession=""
     local info=""
@@ -2350,6 +2497,17 @@ function get_macos() {
         CHUNKCHECK="$(command -v chunkcheck)"
     fi
 
+    # The recovery image and firmware are reusable; a second invocation should
+    # also work when Apple's recovery service is temporarily unavailable.
+    if [ "${RELEASE}" == "tahoe" ] && [ -z "${OPERATION}" ] && [ -s "${VM_PATH}/RecoveryImage.img" ]; then
+        provision_macos_tahoe
+        local BOOT_STATUS=$?
+        if [ "${BOOT_STATUS}" -ne 0 ]; then
+            exit "${BOOT_STATUS}"
+        fi
+        make_vm_config RecoveryImage.img
+    fi
+
     appleSession=$(curl --disable -v -H "Host: osrecovery.apple.com" \
                            -H "Connection: close" \
                            -A "InternetRecovery/1.0" https://osrecovery.apple.com/ 2>&1 | tr ';' '\n' | awk -F'session=|;' '{print $2}' | grep 1)
@@ -2365,6 +2523,11 @@ function get_macos() {
     chunkListLink=$(echo "$info" | grep 'oscdn' | grep 'chunklist')
     chunkListSession=$(echo "$info" | grep 'expires' | grep 'chunklist')
 
+    if [ "${RELEASE}" == "tahoe" ] && { [ -z "${downloadLink}" ] || [ -z "${downloadSession}" ] || [ -z "${chunkListLink}" ] || [ -z "${chunkListSession}" ]; }; then
+        echo "ERROR! Apple did not return a complete macOS Tahoe recovery download response. Please retry."
+        exit 1
+    fi
+
     if [ "${OPERATION}" == "show" ]; then
         test_result "${OS}" "${RELEASE}" "" "${downloadLink}"
         exit 0
@@ -2379,12 +2542,17 @@ function get_macos() {
         web_get "${chunkListLink}" "${VM_PATH}" RecoveryImage.chunklist --header "Host: oscdn.apple.com" --header "Connection: close" --header "User-Agent: InternetRecovery/1.0" --header "Cookie: AssetToken=${chunkListSession}"
         VM_PATH="$(pwd)"
     else
-        if [ ! -e "${VM_PATH}/RecoveryImage.chunklist" ]; then
+        if { [ "${RELEASE}" == "tahoe" ] && [ ! -s "${VM_PATH}/RecoveryImage.img" ]; } || { [ "${RELEASE}" != "tahoe" ] && [ ! -e "${VM_PATH}/RecoveryImage.chunklist" ]; }; then
             echo "Downloading macOS (${RELEASE^}) RecoveryImage"
             echo " - URL: ${downloadLink}"
             web_get "${downloadLink}" "${VM_PATH}" RecoveryImage.dmg --header "Host: oscdn.apple.com" --header "Connection: close" --header "User-Agent: InternetRecovery/1.0" --header "Cookie: AssetToken=${downloadSession}"
             web_get "${chunkListLink}" "${VM_PATH}" RecoveryImage.chunklist --header "Host: oscdn.apple.com" --header "Connection: close" --header "User-Agent: InternetRecovery/1.0" --header "Cookie: AssetToken=${chunkListSession}"
             if ! "${CHUNKCHECK}" "${VM_PATH}" 2> /dev/null; then
+                if [ "${RELEASE}" == "tahoe" ]; then
+                    echo "ERROR! Recovery image verification failed. Run quickget again to retry the download."
+                    rm -f "${VM_PATH}/RecoveryImage.dmg" "${VM_PATH}/RecoveryImage.chunklist"
+                    exit 1
+                fi
                 echo " - WARNING! Verification failed, continuing anyway"
             else
                 echo " - Verification passed"
@@ -2393,10 +2561,28 @@ function get_macos() {
             if [ -e "${VM_PATH}/RecoveryImage.dmg" ] && [ ! -e "${VM_PATH}/RecoveryImage.img" ]; then
                 require_qemu_img
                 echo " - Converting RecoveryImage.dmg"
-                ${QEMU_IMG} convert "${VM_PATH}/RecoveryImage.dmg" -O raw "${VM_PATH}/RecoveryImage.img" 2>/dev/null
+                if [ "${RELEASE}" == "tahoe" ]; then
+                    if ! "${QEMU_IMG}" convert "${VM_PATH}/RecoveryImage.dmg" -O raw -o nocow=on "${VM_PATH}/RecoveryImage.img.tmp"; then
+                        rm -f "${VM_PATH}/RecoveryImage.img.tmp"
+                        echo "ERROR! Failed to convert the macOS Tahoe recovery image."
+                        exit 1
+                    fi
+                    mv "${VM_PATH}/RecoveryImage.img.tmp" "${VM_PATH}/RecoveryImage.img"
+                else
+                    ${QEMU_IMG} convert "${VM_PATH}/RecoveryImage.dmg" -O raw "${VM_PATH}/RecoveryImage.img" 2>/dev/null
+                fi
             fi
             rm "${VM_PATH}/RecoveryImage.dmg" "${VM_PATH}/RecoveryImage.chunklist"
             echo " - RecoveryImage.img is ready."
+        fi
+
+        if [ "${RELEASE}" == "tahoe" ]; then
+            provision_macos_tahoe
+            local BOOT_STATUS=$?
+            if [ "${BOOT_STATUS}" -ne 0 ]; then
+                exit "${BOOT_STATUS}"
+            fi
+            make_vm_config RecoveryImage.img
         fi
 
         echo "Downloading OpenCore & UEFI firmware"
@@ -3764,6 +3950,7 @@ Advanced usage:
 
 Arguments:
    --arch           <arch>                    : Set architecture (arm64, aarch64, amd64, x86_64)
+   --unattended     macos tahoe                : Prepare automatic installation (x86_64 host and guest)
    --download       <os> <release> [edition]  : Download image; no VM configuration
    --create-config  <os> [path/url] [flags]   : Create VM config for an OS image
    --open-homepage  <os>                      : Open homepage for the OS
@@ -3797,6 +3984,7 @@ QUICKEMU=$(resolve_quickemu)
 I18NS=()
 OPERATION=""
 CHECK_ALL_ARCH="false"
+UNATTENDED="off"
 # Normalised host architecture for foreign arch detection
 NORMALISED_HOST_ARCH="${ARCH}"
 CURL=$(command -v curl)
@@ -3807,6 +3995,25 @@ fi
 CURL_VERSION=$("${CURL}" --version | head -n 1 | cut -d' ' -f2)
 
 #TODO: Deprecate `list`, `list_csv`, and `list_json` in favor of `--list`, `--list-csv`, and `--list-json`
+
+# Keep the existing --create-config Windows flag semantics intact. For a new
+# Tahoe VM, --unattended may appear before or after the OS and release.
+CREATE_CONFIG_REQUESTED="false"
+for ARG in "${@}"; do
+    case "${ARG}" in
+        --create-config|-create-config) CREATE_CONFIG_REQUESTED="true";;
+    esac
+done
+if [ "${CREATE_CONFIG_REQUESTED}" == "false" ]; then
+    POSITIONAL_ARGS=()
+    for ARG in "${@}"; do
+        case "${ARG}" in
+            --unattended) UNATTENDED="on";;
+            *) POSITIONAL_ARGS+=("${ARG}");;
+        esac
+    done
+    set -- "${POSITIONAL_ARGS[@]}"
+fi
 
 # Function to process --arch flag
 function parse_arch_flag() {
@@ -3925,6 +4132,21 @@ else
 fi
 
 os_supported
+
+if [ "${UNATTENDED}" == "on" ]; then
+    if [ "${OS}" != "macos" ] || [ "${2}" != "tahoe" ] || [ -n "${OPERATION}" ]; then
+        echo "ERROR! --unattended is supported when creating a new macOS Tahoe VM: quickget --unattended macos tahoe"
+        exit 1
+    fi
+    if [ "${ARCH}" != "amd64" ] || [ "${HOST_ARCH}" != "x86_64" ]; then
+        echo "ERROR! Unattended macOS Tahoe installation requires an x86_64 host and guest."
+        exit 1
+    fi
+    if [ -e "macos-tahoe.conf" ]; then
+        echo "ERROR! macos-tahoe.conf already exists. Set macos_unattended=\"on\" in that configuration to opt in."
+        exit 1
+    fi
+fi
 
 # Handle --check-all-arch for specific release/edition
 if [ "${CHECK_ALL_ARCH}" == "true" ] && [ -n "${2}" ]; then

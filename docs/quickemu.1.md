@@ -557,6 +557,20 @@ driver which is better supported on older distros.
 
 ## [Creating macOS Guests](https://github.com/quickemu-project/quickemu/wiki/03-Create-macOS-virtual-machines#automatically-create-macos-guests) 🍏
 
+For unattended Tahoe installation on an x86_64 host:
+
+```shell
+quickget --unattended macos tahoe
+quickemu --vm macos-tahoe.conf --display none
+```
+
+This creates an administrator account with a generated password and SSH key.
+Allow several hours for installation and automatic reboots. The main disk uses
+raw format and NOCOW on Btrfs. See
+[the Tahoe guide](https://github.com/quickemu-project/quickemu/blob/master/docs/macos-tahoe.md)
+for credentials and progress diagnostics. The following steps describe manual
+installation.
+
 **Installing macOS in a VM can be a bit finicky, if you encounter
 problems, [check the
 Discussions](https://github.com/quickemu-project/quickemu/discussions)
@@ -577,8 +591,8 @@ quickget macos big-sur
 quickemu --vm macos-big-sur.conf
 ```
 
-macOS `mojave`, `catalina`, `big-sur`, `monterey`, `ventura` and
-`sonoma` are supported.
+macOS `mojave`, `catalina`, `big-sur`, `monterey`, `ventura`, `sonoma`,
+`sequoia` and `tahoe` are supported.
 
 - Use cursor keys and enter key to select the **macOS Base System**
 - From **macOS Utilities**

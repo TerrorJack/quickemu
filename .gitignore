@@ -18,7 +18,9 @@
 *.ports
 *.qcow2
 *.sh
+!macos-unattended-guest/*.sh
 *.sock
 *.xml
 *.zs-old
 .direnv/
+__pycache__/

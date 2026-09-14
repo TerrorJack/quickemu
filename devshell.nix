@@ -11,6 +11,7 @@ mkShell {
     with pkgs;
     (
       [
+        _7zz
         cdrtools
         curl
         e2fsprogs
@@ -18,6 +19,8 @@ mkShell {
         gnugrep
         gnused
         jq
+        mtools
+        openssh
         OVMF
         OVMFFull
         pciutils
@@ -27,6 +30,7 @@ mkShell {
         socat
         spice-gtk
         swtpm
+        tesseract
         unzip
         util-linux
         xorg.xrandr
@@ -67,5 +71,6 @@ mkShell {
       sed -i -e 's,\$(command -v smbd),${pkgs.samba}/bin/smbd,' $PWD/.direnv/bin/quickemu
     ''}
     chmod +x $PWD/.direnv/bin/quickemu
+    ln -sfn "$PWD/quickemu-macos" "$PWD/.direnv/bin/quickemu-macos"
   '';
 }

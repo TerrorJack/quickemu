@@ -1,4 +1,11 @@
 chunkcheck usr/bin
 quickemu usr/bin
+quickemu-macos usr/bin
+macos-unattended-guest/build.py usr/share/quickemu/macos-unattended-guest
+macos-unattended-guest/recovery.sh usr/share/quickemu/macos-unattended-guest
+macos-unattended-guest/postinstall.sh usr/share/quickemu/macos-unattended-guest
+macos-unattended-guest/firstboot.sh usr/share/quickemu/macos-unattended-guest
+macos-unattended-guest/com.apple.keyboardtype.plist usr/share/quickemu/macos-unattended-guest
+macos-unattended-guest/org.quickemu.firstboot.plist usr/share/quickemu/macos-unattended-guest
 quickget usr/bin
 quickreport usr/bin

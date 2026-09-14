@@ -31,6 +31,11 @@ configuration for `quickemu` to use to build and run
 **--download** <os> <release> \[edition\]
 :   Download image; no VM configuration
 
+**--unattended** macos tahoe
+:   Prepare an automatic macOS Tahoe installation for an x86_64 host and guest.
+    The generated configuration uses a raw disk, 8 GiB RAM and 1 CPU core on
+    AMD hosts (4 on other hosts).
+
 **--create-config** <os> \[path/url\]
 :   Create VM config for a OS image
 
@@ -124,6 +129,7 @@ You can also use `quickget` with advanced options :
 
 ``` text
    --arch           <arch>                    : Set architecture (arm64, aarch64, amd64, x86_64)
+   --unattended     macos tahoe                : Prepare automatic installation (x86_64 host and guest)
    --download       <os> <release> [edition]  : Download image; no VM configuration
    --create-config  <os> [path/url] [flags]   : Create VM config for an OS image
    --open-homepage  <os>                      : Open homepage for the OS
@@ -281,6 +287,20 @@ driver which is better supported on older distros.
 
 ## [Creating macOS Guests](https://github.com/quickemu-project/quickemu/wiki/03-Create-macOS-virtual-machines#automatically-create-macos-guests) 🍏
 
+For unattended Tahoe installation on an x86_64 host:
+
+```shell
+quickget --unattended macos tahoe
+quickemu --vm macos-tahoe.conf --display none
+```
+
+This creates an administrator account with a generated password and SSH key.
+Allow several hours for installation and automatic reboots. The main disk uses
+raw format and NOCOW on Btrfs. See
+[the Tahoe guide](https://github.com/quickemu-project/quickemu/blob/master/docs/macos-tahoe.md)
+for credentials and progress diagnostics. The following steps describe manual
+installation.
+
 **Installing macOS in a VM can be a bit finicky, if you encounter
 problems, [check the
 Discussions](https://github.com/quickemu-project/quickemu/discussions)
@@ -301,8 +321,8 @@ quickget macos big-sur
 quickemu --vm macos-big-sur.conf
 ```
 
-macOS `mojave`, `catalina`, `big-sur`, `monterey`, `ventura` and
-`sonoma` are supported.
+macOS `mojave`, `catalina`, `big-sur`, `monterey`, `ventura`, `sonoma`,
+`sequoia` and `tahoe` are supported.
 
 - Use cursor keys and enter key to select the **macOS Base System**
 - From **macOS Utilities**

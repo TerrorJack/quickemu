@@ -28,6 +28,9 @@ install_bins:
 	install -d $(DESTDIR)$(bindir)
 	install -m 755 ../quickget $(DESTDIR)$(bindir)
 	install -m 755 ../quickemu $(DESTDIR)$(bindir)
+	install -m 755 ../quickemu-macos $(DESTDIR)$(bindir)
+	install -d $(DESTDIR)$(datadir)/quickemu/macos-unattended-guest
+	install -m 644 ../macos-unattended-guest/build.py ../macos-unattended-guest/recovery.sh ../macos-unattended-guest/postinstall.sh ../macos-unattended-guest/firstboot.sh ../macos-unattended-guest/com.apple.keyboardtype.plist ../macos-unattended-guest/org.quickemu.firstboot.plist $(DESTDIR)$(datadir)/quickemu/macos-unattended-guest
 	install -m 755 ../quickreport $(DESTDIR)$(bindir)
 	install -m 755 ../chunkcheck $(DESTDIR)$(bindir)
 
@@ -39,6 +42,8 @@ uninstall::
 	rm -f $(DESTDIR)$(mandir)/man5/quickemu_conf.5
 	rm -f $(DESTDIR)$(bindir)/quickget
 	rm -f $(DESTDIR)$(bindir)/quickemu
+	rm -f $(DESTDIR)$(bindir)/quickemu-macos
+	rm -rf $(DESTDIR)$(datadir)/quickemu/macos-unattended-guest
 	rm -f $(DESTDIR)$(bindir)/quickreport
 	rm -f $(DESTDIR)$(bindir)/macrecovery
 	rm -f $(DESTDIR)$(bindir)/chunkcheck

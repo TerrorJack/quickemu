@@ -38,7 +38,7 @@ required to run the virtual machines.
 # Features
 
 - Host support for **Linux and macOS**
-- **macOS** Sequoia, Sonoma, Ventura, Monterey, Big Sur, Catalina & Mojave
+- **macOS** Tahoe, Sequoia, Sonoma, Ventura, Monterey, Big Sur, Catalina & Mojave
 - **Windows** 10 and 11 including TPM 2.0
 - **Windows Server** 2022 2019 2016
 - **ARM64 guest support** for running aarch64 VMs (native on ARM hosts, emulated on x86_64)
@@ -92,6 +92,18 @@ quickemu --vm nixos-unstable-minimal.conf
 
 Execute `quickget` (with no arguments) to see a list of all the supported operating systems.
 
+To install macOS Tahoe automatically on an x86_64 host:
+
+``` shell
+quickget --unattended macos tahoe
+quickemu --vm macos-tahoe.conf --display none
+```
+
+The generated VM uses a 128 GiB raw disk, 8 GiB RAM and 1 CPU core on AMD
+hosts (4 on other hosts). See
+[unattended macOS Tahoe installation](docs/macos-tahoe.md) for requirements,
+credentials and progress diagnostics.
+
 ## Demo
 
 <div align="center">
@@ -107,6 +119,7 @@ The wiki describes how to get up and running with Quickemu and also covers more 
 - [**Installation**](https://github.com/quickemu-project/quickemu/wiki/01-Installation) 💾
 - [**Create Linux virtual machines**](https://github.com/quickemu-project/quickemu/wiki/02-Create-Linux-virtual-machines) 🐧
 - [**Create macOS virtual machines**](https://github.com/quickemu-project/quickemu/wiki/03-Create-macOS-virtual-machines) 🍏
+- [**Install macOS Tahoe automatically**](docs/macos-tahoe.md)
 - [**Create Windows virtual machines**](https://github.com/quickemu-project/quickemu/wiki/04-Create-Windows-virtual-machines) 🪟
 - [**Advanced quickemu configuration**](https://github.com/quickemu-project/quickemu/wiki/05-Advanced-quickemu-configuration) 🔧
 - [**Advanced quickget features**](https://github.com/quickemu-project/quickemu/wiki/06-Advanced-quickget-features) 🤓

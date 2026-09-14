@@ -531,7 +531,6 @@ function configure_cpu() {
     # Configure appropriately for the host platform
     if [ "${OS_KERNEL}" == "Darwin" ]; then
         MANUFACTURER=$(ioreg -l | grep -e Manufacturer | grep -v iMan | cut -d'"' -f4 | sort -u)
-        CPU_KVM_UNHALT=""
         QEMU_ACCEL="hvf"
         # QEMU for macOS from Homebrew does not support SMM
         SMM="off"
@@ -539,7 +538,6 @@ function configure_cpu() {
         if [ -r /sys/class/dmi/id/sys_vendor ]; then
             MANUFACTURER=$(head -n 1 /sys/class/dmi/id/sys_vendor)
         fi
-        CPU_KVM_UNHALT=",kvm_pv_unhalt"
         if [[ "${ARCH_VM}" != "aarch64" ]]; then
             GUEST_TWEAKS+=" -global kvm-pit.lost_tick_policy=discard"
         fi
@@ -580,7 +578,6 @@ function configure_cpu() {
         # - Testing VMs on hosts without hardware virtualisation support
         # - Emulating CPU features in software (e.g., running macOS x86_64 VMs on ARM Macs)
         CPU_MODEL="qemu64"
-        CPU_KVM_UNHALT=""
         QEMU_ACCEL="tcg"
     fi
 
@@ -721,6 +718,30 @@ function configure_cpu() {
                         add_cpu_flag "+tsc-deadline"
                     fi
                 fi
+            fi
+
+            if [ "${macos_release}" == "tahoe" ]; then
+                # Use the Intel CPU model tested by dockur/macos on Intel and AMD.
+                CPU_MODEL="Skylake-Client-v4"
+                CPU="-cpu ${CPU_MODEL},vendor=GenuineIntel,vmx=off,vmware-cpuid-freq=on,-pdpe1gb,l3-cache=on,+hypervisor"
+                reset_cpu_flags
+                GUEST_TWEAKS+=" -global ICH9-LPC.disable_s4=1"
+                if [ "${QEMU_ACCEL}" == "kvm" ]; then
+                    CPU+=",kvm=on"
+                    if check_cpu_flag invtsc || { check_cpu_flag constant_tsc && check_cpu_flag nonstop_tsc; }; then
+                        add_cpu_flag "+invtsc"
+                    fi
+                fi
+                for FLAG in pcid invpcid tsc_deadline_timer xsavec xsaves spec_ctrl; do
+                    local tahoe_flag
+                    tahoe_flag="${FLAG//_/-}"
+                    [ "${FLAG}" != "tsc_deadline_timer" ] || tahoe_flag="tsc-deadline"
+                    if check_cpu_flag "${FLAG}"; then
+                        add_cpu_flag "+${tahoe_flag}"
+                    else
+                        add_cpu_flag "-${tahoe_flag}"
+                    fi
+                done
             fi
 
             # Disable S3 support in the VM to prevent macOS suspending during install
@@ -933,7 +954,10 @@ function configure_bios() {
         fi
 
         # Check for OpenCore bootloader
-        if [ -e "${VMDIR}/OpenCore.qcow2" ]; then
+        if [ -e "${VMDIR}/OpenCore.img" ]; then
+            MAC_BOOTLOADER="${VMDIR}/OpenCore.img"
+            MAC_BOOTLOADER_FORMAT="raw"
+        elif [ -e "${VMDIR}/OpenCore.qcow2" ]; then
             MAC_BOOTLOADER="${VMDIR}/OpenCore.qcow2"
         elif [ -e "${VMDIR}/ESP.qcow2" ]; then
             # Backwards compatibility for Clover
@@ -1151,6 +1175,16 @@ function configure_os_quirks() {
 
 function configure_storage() {
     local create_options=""
+    local require_nocow="no"
+    if [ "${macos_unattended}" == "on" ]; then
+        if [ "${disk_format}" != "raw" ]; then
+            echo "ERROR! Unattended macOS installation requires disk_format=\"raw\"."
+            exit 1
+        fi
+        if [ "${KERNEL_NAME}" == "Linux" ] && [ "$(stat -f -c %T "${VMDIR}")" == "btrfs" ]; then
+            require_nocow="yes"
+        fi
+    fi
     echo " - Disk:     ${disk_img} (${disk_size})"
     if [ ! -f "${disk_img}" ]; then
         # If there is no disk image, create a new image.
@@ -1170,6 +1204,10 @@ function configure_storage() {
         # Disable copy-on-write before the disk image is populated.
         touch "${disk_img}"
         chattr +C "${disk_img}" >/dev/null 2>&1 || true
+        if [ "${require_nocow}" == "yes" ] && ! lsattr -d "${disk_img}" | cut -d' ' -f1 | grep -q C; then
+            echo "ERROR! Failed to set NOCOW on ${disk_img}; refusing to populate it."
+            exit 1
+        fi
 
         # https://blog.programster.org/qcow2-performance
         if ! ${QEMU_IMG} create -q -f "${disk_format}" -o "${create_options=}" "${disk_img}" "${disk_size}"; then
@@ -1184,6 +1222,10 @@ function configure_storage() {
         echo "             Just created, booting from ${iso}${img}"
         DISK_USED="no"
     elif [ -e "${disk_img}" ]; then
+        if [ "${require_nocow}" == "yes" ] && ! lsattr -d "${disk_img}" | cut -d' ' -f1 | grep -q C; then
+            echo "ERROR! ${disk_img} is on Btrfs without NOCOW. Use a new raw disk for unattended installation."
+            exit 1
+        fi
         # If the VM is not running, check for disk related issues.
         if [ -z "${VM_PID}" ]; then
             # Check there isn't already a process attached to the disk image.
@@ -1202,7 +1244,12 @@ function configure_storage() {
 
         # Only check disk image size if preallocation is off
         if [ "${preallocation}" == "off" ]; then
-            DISK_CURR_SIZE=$(${STAT} -c%s "${disk_img}")
+            if [ "${disk_format}" == "raw" ]; then
+                # Sparse raw disks have their final apparent size from creation.
+                DISK_CURR_SIZE=$(( $(${STAT} -c%b "${disk_img}") * 512 ))
+            else
+                DISK_CURR_SIZE=$(${STAT} -c%s "${disk_img}")
+            fi
             if [ "${DISK_CURR_SIZE}" -le "${DISK_MIN_SIZE}" ]; then
                 echo "             Looks unused, booting from ${iso}${img}"
                 if [ -z "${iso}" ] && [ -z "${img}" ]; then
@@ -1215,6 +1262,16 @@ function configure_storage() {
         else
             DISK_USED="yes"
         fi
+    fi
+
+    if [ "${macos_unattended}" == "on" ]; then
+        "${MACOS_HELPER}" prepare --dir "${VMDIR}" --disk "${disk_img}" || exit 1
+    fi
+
+    if [ "${guest_os}" == "macos" ] && [ "${macos_unattended}" == "on" ] && [ ! -e "${VMDIR}/unattended/complete" ]; then
+        # A raw image has its final apparent size even before installation, and
+        # the installer needs recovery media across interrupted first boots.
+        DISK_USED="no"
     fi
 
     if [ "${DISK_USED}" == "yes" ] && [ "${guest_os}" != "kolibrios" ]; then
@@ -2002,9 +2059,13 @@ function vm_boot() {
                 -blockdev node-name=efivars,driver=file,filename="${EFI_VARS}")
         else
           # x86 uses traditional pflash drives with secure boot support
+          # Secure flash accepts writes only from SMM. macOS uses non-SMM
+          # firmware; securing its flash silently prevents persistent NVRAM.
+          if [ "${SMM}" == "on" ]; then
+              args+=(-global "driver=cfi.pflash01,property=secure,value=on")
+          fi
           # shellcheck disable=SC2054
-          args+=(-global driver=cfi.pflash01,property=secure,value=on
-              -drive if=pflash,format="${EFI_CODE_FORMAT}",unit=0,file="${EFI_CODE}",readonly=on
+          args+=(-drive if=pflash,format="${EFI_CODE_FORMAT}",unit=0,file="${EFI_CODE}",readonly=on
               -drive if=pflash,format="${EFI_VARS_FORMAT}",unit=1,file="${EFI_VARS}")
         fi
     fi
@@ -2083,7 +2144,7 @@ function vm_boot() {
         # shellcheck disable=SC2054
         args+=(-device ahci,id=ahci
             -device ide-hd,bus=ahci.0,drive=BootLoader,bootindex=0
-            -drive id=BootLoader,if=none,format=qcow2,file="${MAC_BOOTLOADER}")
+            -drive id=BootLoader,if=none,format="${MAC_BOOTLOADER_FORMAT:-qcow2}",file="${MAC_BOOTLOADER}")
 
         if [ -n "${img}" ]; then
             # shellcheck disable=SC2054
@@ -2091,9 +2152,16 @@ function vm_boot() {
                 -drive id=RecoveryImage,if=none,format=raw,file="${img}")
         fi
 
+        if [ "${macos_unattended}" == "on" ] && [ ! -e "${VMDIR}/unattended/complete" ]; then
+            # Writable seed media carries the installer package and progress logs.
+            # shellcheck disable=SC2054
+            args+=(-device ide-hd,bus=ahci.3,drive=MacOSSeed
+                -drive id=MacOSSeed,if=none,format=raw,file="${VMDIR}/unattended/seed.img")
+        fi
+
         # shellcheck disable=SC2054,SC2206
         args+=(-object iothread,id=iothread0
-            -device ${MAC_DISK_DEV},drive=SystemDisk,iothread=iothread0
+            -device ${MAC_DISK_DEV},drive=SystemDisk,iothread=iothread0,serial=QUICKEMU_SYSTEM
             -drive id=SystemDisk,if=none,format=${disk_format},file="${disk_img}",${DRIVE_OPTIMISATIONS} ${STATUS_QUO})
     elif [ "${guest_os}" == "kolibrios" ]; then
         # shellcheck disable=SC2054,SC2206
@@ -2216,6 +2284,10 @@ function vm_boot() {
     if [ -n "${extra_args}" ]; then
         # shellcheck disable=SC2206
         args+=(${extra_args})
+    fi
+
+    if [ "${macos_unattended}" == "on" ]; then
+        args+=(-qmp "unix:${VMDIR}/${VMNAME}-qmp.socket,server=on,wait=off")
     fi
 
     # The OSK parameter contains parenthesis, they need to be escaped in the shell
@@ -2617,6 +2689,8 @@ img=""
 iso=""
 macaddr=""
 macos_release=""
+macos_unattended="off"
+macos_install_timeout=14400
 network=""
 port_forwards=()
 preallocation="off"
@@ -2879,7 +2953,7 @@ fi
 
 if [ -n "${VM}" ] && [ -e "${VM}" ]; then
     # shellcheck source=/dev/null
-    source "${VM}"
+    source "$(realpath "${VM}")"
     PUBLIC="${public_dir:-${PUBLIC}}"
 
     # Re-detect architecture and QEMU binary after sourcing config
@@ -2981,6 +3055,26 @@ tpm_param_check
 viewer_param_check
 fileshare_param_check
 
+if [ "${macos_unattended}" == "on" ]; then
+    if [ "${guest_os}" != "macos" ] || [ "${macos_release}" != "tahoe" ] ||
+       [ "${ARCH_VM}" != "x86_64" ] || [ "${ARCH_HOST}" != "x86_64" ]; then
+        echo "ERROR! Unattended macOS installation supports Tahoe on x86_64 hosts and guests."
+        exit 1
+    fi
+    if [ ! -e "${VMDIR}/unattended/complete" ] && { [ -n "${network}" ] || [ -n "${STATUS_QUO}" ]; }; then
+        echo "ERROR! Unattended macOS installation requires default networking and persistent disk writes."
+        exit 1
+    fi
+    MACOS_HELPER="$(dirname "$(realpath "${BASH_SOURCE[0]}")")/quickemu-macos"
+    if [ ! -x "${MACOS_HELPER}" ]; then
+        MACOS_HELPER="$(command -v quickemu-macos)"
+    fi
+    if [ ! -x "${MACOS_HELPER}" ]; then
+        echo "ERROR! quickemu-macos is required for unattended macOS installation."
+        exit 1
+    fi
+fi
+
 if [ -z "${VM_PID}" ]; then
     vm_boot
     start_viewer
@@ -3008,6 +3102,11 @@ fi
 
 if [ -n "${MONITOR_CMD}" ]; then
     monitor_send_cmd "${MONITOR_CMD}"
+fi
+
+if [ "${macos_unattended}" == "on" ] && [ -z "${MONITOR_CMD}" ]; then
+    "${MACOS_HELPER}" run --dir "${VMDIR}" --disk "${disk_img}" --qmp "${VMDIR}/${VMNAME}-qmp.socket" \
+        --ssh-port "${ssh_port}" --timeout "${macos_install_timeout}" || exit 1
 fi
 
 # vim:tabstop=4:shiftwidth=4:expandtab
